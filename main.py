@@ -1,12 +1,16 @@
 import os
-import requests  # type: ignore
-from fastapi import FastAPI, Request, status
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings, TurnContext  # type: ignore
-from botbuilder.schema import Activity  # type: ignore
-from bot import MyBot
+from fastapi.responses import StreamingResponse
 import google.generativeai as genai  # type: ignore
+
+#======================================================
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDssKxVuhRXW3gZ3PEj4Z1TSjDT5GvhGi0")
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel("gemini-1.5-flash")
+
+#======================================================
 
 app = FastAPI()
 
@@ -17,55 +21,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-#============================================================================
-
-APP_ID = os.getenv("MICROSOFT_APP_ID", "8117b55b-80e3-415c-b2be-31207706ef36")
-APP_PASSWORD = os.getenv("MICROSOFT_APP_PASSWORD", "VDl8Q~BIwa~9fdM-iAvnYRIJnZG8ibMMe_QFibNZ")
-
-adapter_settings = BotFrameworkAdapterSettings(APP_ID, APP_PASSWORD)
-adapter = BotFrameworkAdapter(adapter_settings)
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDssKxVuhRXW3gZ3PEj4Z1TSjDT5GvhGi0")
-genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel("gemini-1.5-flash")
-
-bot = MyBot(gemini_model)
+#======================================================
 
 @app.get("/")
-async def root():
-    return {"status": "Backend çalışıyor!"}
+async def health_check():
+    return {"status": "LangGraph Gemini backend çalışıyor!"}
 
-@app.post("/api/messages")
-async def messages(request: Request):
-    try:
-        body = await request.json()
-        activity = Activity().deserialize(body)
-        auth_header = request.headers.get("Authorization", None)
+#======================================================
 
-        async def aux_func(turn_context: TurnContext):
-            await bot.on_turn(turn_context)
+async def handle_invoke(request: Request):
+    data = await request.json()
+    messages = data.get("messages", [])
 
-        await adapter.process_activity(activity, auth_header, aux_func)
-        return JSONResponse(content={}, status_code=200)
-    except Exception as e:
-        print(f"[ERROR] {e}")
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+    if not messages:
+        return {"error": "Mesaj listesi boş"}
 
-#============================================================================
+    user_message = messages[-1].get("content", "")
+    if not user_message:
+        return {"error": "Mesaj içeriği boş"}
 
-DIRECT_LINE_SECRET = os.getenv("DIRECT_LINE_SECRET", "3UlKH4RiNBzUT2QIOYZbwnd88Suz3Yk4PBgiXnuLUZsljhTh5Xf7JQQJ99BGAC5RqLJAArohAAABAZBS18fk.5epkxeyXYkV0Me67xt38qY9PX8YdwCyoqpL4EyTq1p7LMkyflofmJQQJ99BGAC5RqLJAArohAAABAZBS1Gby")
+    async def stream_response():
+        chat = model.start_chat()
+        async for chunk in chat.send_message_async(user_message, stream=True):
+            if chunk.text:
+                yield chunk.text
 
-@app.post("/get_token", status_code=status.HTTP_200_OK)
-async def get_token():
-    url = "https://directline.botframework.com/v3/directline/tokens/generate"
-    headers = {"Authorization": f"Bearer {DIRECT_LINE_SECRET}"}
-    response = requests.post(url, headers=headers)
-    if response.status_code == 200:
-        return JSONResponse(content=response.json())
-    return JSONResponse(content={"error": "Token alınamadı"}, status_code=500)
+    return StreamingResponse(stream_response(), media_type="text/plain")
 
+#======================================================
 
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8080))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+@app.post("/invoke")
+async def invoke(request: Request):
+    return await handle_invoke(request)
+
+@app.post("/api/copilotkit")
+async def copilotkit_endpoint(request: Request):
+    return await handle_invoke(request)
+
+#======================================================
